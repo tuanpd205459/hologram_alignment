@@ -65,19 +65,33 @@ def process_folder(raw_dir, output_dir):
             k_shifts = results['k_shifts']
             print(f"  -> Lượng dịch sub-pixel (k1, k2): {k_shifts[0]:.4f}, {k_shifts[1]:.4f}")
             
-            # Tính hiệu pha
+            # Tính toán phân bố pha
             field_1 = results['field_1']
             field_2 = results['field_2_aligned']
+            
+            phase1 = np.angle(field_1)
+            phase2 = np.angle(field_2)
             phase_diff = np.angle(field_1 * np.conj(field_2))
             
-            # Vẽ và xuất ảnh kết quả
-            plt.figure(figsize=(6, 5))
-            plt.imshow(phase_diff, cmap='jet')
-            plt.title(f"Hiệu pha - Mẫu {prefix}")
-            plt.colorbar(label="Phase (radians)")
+            # Vẽ và xuất ảnh kết quả với 3 biểu đồ (Subplots)
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
             
-            # Tên file xuất ra: "78_phase_diff.png"
-            out_file = os.path.join(output_dir, f"{prefix}_phase_diff.png")
+            im0 = axes[0].imshow(phase1, cmap='gray')
+            axes[0].set_title(f"Pha ảnh 1 - {prefix}")
+            fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+            
+            im1 = axes[1].imshow(phase2, cmap='gray')
+            axes[1].set_title(f"Pha ảnh 2 (đã dịch) - {prefix}")
+            fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+            
+            im2 = axes[2].imshow(phase_diff, cmap='jet')
+            axes[2].set_title(f"Hiệu pha - Mẫu {prefix}")
+            fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+            
+            plt.tight_layout()
+            
+            # Tên file xuất ra: "78_phase_results.png"
+            out_file = os.path.join(output_dir, f"{prefix}_phase_results.png")
             plt.savefig(out_file, dpi=150, bbox_inches='tight')
             plt.close()
             
