@@ -171,9 +171,14 @@ def detect_carrier(holo, min_area=5, margin=5.0):
     Trả về: (kx, ky, rx, ry, abs_y, abs_x)
     """
     try:
-        F = np.fft.fftshift(np.fft.fft2(holo))
-        amp = np.abs(F)
         H, W = holo.shape
+        # Áp dụng Hanning window để triệt tiêu nhiễu chữ thập (cross artifacts) ở trục ngang/dọc
+        window = np.outer(np.hanning(H), np.hanning(W))
+        holo_windowed = holo * window
+        
+        F = np.fft.fftshift(np.fft.fft2(holo_windowed))
+        amp = np.abs(F)
+        
         kx, ky, rx, ry = _detect_sideband(amp, H, W, min_area, margin)
         return kx, ky, rx, ry, float(H // 2 + ky), float(W // 2 + kx)
     except Exception as e:
@@ -253,57 +258,82 @@ def apply_subpixel_shift(F_centered, k1, k2):
     return field * ramp
 
 
-def phase_alignment_cost(k, F_centered_1, F_centered_2):
+def phase_alignment_cost(k, field_1_base, field_2_base):
     """
-    Hàm mục tiêu: Tối ưu hóa ĐỒNG THỜI lượng dịch cho cả ảnh 1 (k1) và ảnh 2 (k2).
-    - Ảnh 1 thực hiện shift với k1 = (k1x, k1y)
-    - Ảnh 2 thực hiện shift với k2 = (k2x, k2y)
-    - Vòng lặp minimize sẽ chạy hàm này liên tục để tìm k làm cho Pha 1 ~ Pha 2.
+    Hàm mục tiêu: Tối ưu hóa ĐỒNG THỜI lượng dịch cho cả ảnh 1 và ảnh 2.
+    Đã đưa IFFT ra ngoài vòng lặp để tối ưu hóa tốc độ tính toán.
     """
-    k1x, k1y, k2x, k2y = k
+    k1y, k1x, k2y, k2x = k
+    H, W = field_1_base.shape
+    y, x = np.mgrid[0:H, 0:W]
     
-    # Shift cả 2 ảnh
-    field_1 = apply_subpixel_shift(F_centered_1, k1x, k1y)
-    field_2 = apply_subpixel_shift(F_centered_2, k2x, k2y)
+    # Tạo phase ramp để shift trong miền không gian
+    ramp1 = np.exp(1j * 2 * np.pi * (k1y * y / H + k1x * x / W))
+    field_1 = field_1_base * ramp1
     
-    # Tính sai lệch pha (Pha 1 vs Pha 2)
+    ramp2 = np.exp(1j * 2 * np.pi * (k2y * y / H + k2x * x / W))
+    field_2 = field_2_base * ramp2
+    
+    # Tính sai lệch pha
     diff = field_1 * np.conj(field_2)
     phase_only = diff / (np.abs(diff) + 1e-12)
     
-    # Tính điểm khớp pha. Khi Pha 1 ~ Pha 2, điểm số np.abs(np.mean) sẽ hội tụ về 1.
-    # Thêm lượng regularization siêu nhỏ (1e-6) để giữ (k1, k2) không bị trôi đi vô cực.
-    reg = 1e-6 * (k1x**2 + k1y**2 + k2x**2 + k2y**2)
+    # Regularization nhẹ để tránh trôi dạt 
+    reg = 1e-6 * (k1y**2 + k1x**2 + k2y**2 + k2x**2)
     
     return -np.abs(np.mean(phase_only)) + reg
 
 
 def align_two_holograms(holo_1, holo_2):
     """
-    Quy trình hoàn chỉnh với Differentiable Demodulator và Sub-pixel alignment.
+    Quy trình hoàn chỉnh: Sử dụng Differential Evolution để dò tìm vùng dịch chuyển LỚN
+    (tránh kẹt cực tiểu địa phương), sau đó tinh chỉnh bằng Powell.
     """
-    # 1. Trích xuất (Phổ trả về đã được căn giữa hoàn toàn)
+    from scipy.optimize import differential_evolution
+    
+    # 1. Trích xuất phổ
     F1_c, centroid_1, _ = extract_plus_one_order(holo_1)
     F2_c, centroid_2, _ = extract_plus_one_order(holo_2)
 
-    # 2. Vòng lặp tối ưu hóa (Khởi tạo k1 và k2 đều bằng 0)
-    k_init = [0.0, 0.0, 0.0, 0.0]
+    # Đưa IFFT ra ngoài vòng lặp (chỉ tính 1 lần duy nhất)
+    field_1_base = np.fft.ifft2(np.fft.ifftshift(F1_c))
+    field_2_base = np.fft.ifft2(np.fft.ifftshift(F2_c))
 
-    # Lặp đến khi nào Pha 1 ~ Pha 2 thì dừng
+    # 2. Tìm kiếm toàn cục (Global Search) ở vùng dịch chuyển cực lớn: ±30 pixel!
+    # Thứ tự biến: [k1y, k1x, k2y, k2x]
+    bounds = [(-30.0, 30.0), (-30.0, 30.0), (-30.0, 30.0), (-30.0, 30.0)]
+    
+    res_global = differential_evolution(
+        phase_alignment_cost,
+        bounds=bounds,
+        args=(field_1_base, field_2_base),
+        strategy='best1bin',
+        maxiter=30,     # Số thế hệ lặp của di truyền
+        popsize=10,     # Kích thước quần thể
+        tol=1e-3,
+        mutation=(0.5, 1.0),
+        recombination=0.7,
+        disp=False
+    )
+    
+    # 3. Tinh chỉnh cục bộ siêu chính xác (Local Refinement)
     res = minimize(
         phase_alignment_cost,
-        k_init,
-        args=(F1_c, F2_c),
+        res_global.x,
+        args=(field_1_base, field_2_base),
         method='Powell',
-        options={'maxiter': 500, 'ftol': 1e-9}
+        options={'maxiter': 200, 'ftol': 1e-9}
     )
-    k1x_opt, k1y_opt, k2x_opt, k2y_opt = res.x
+    
+    k1y_opt, k1x_opt, k2y_opt, k2x_opt = res.x
 
-    # 3. Xuất ra Pha 1 và Pha 2 sau khi shift với k1 và k2 tối ưu
-    field_1_aligned = apply_subpixel_shift(F1_c, k1x_opt, k1y_opt)
-    field_2_aligned = apply_subpixel_shift(F2_c, k2x_opt, k2y_opt)
+    # 4. Xuất ra Pha 1 và Pha 2 sau khi shift với tối ưu cuối cùng
+    H, W = field_1_base.shape
+    y, x = np.mgrid[0:H, 0:W]
+    field_1_aligned = field_1_base * np.exp(1j * 2 * np.pi * (k1y_opt * y / H + k1x_opt * x / W))
+    field_2_aligned = field_2_base * np.exp(1j * 2 * np.pi * (k2y_opt * y / H + k2x_opt * x / W))
 
-    # 4. Bù hằng số pha toàn cục (Global Phase Offset) 
-    # Ép hiệu pha hội tụ chính xác về mốc 0.0 rad
+    # 5. Bù hằng số pha toàn cục (ép hiệu pha về 0)
     diff_complex = field_1_aligned * np.conj(field_2_aligned)
     mean_phase_offset = np.angle(np.mean(diff_complex / (np.abs(diff_complex) + 1e-12)))
     field_2_aligned = field_2_aligned * np.exp(1j * mean_phase_offset)
