@@ -4,7 +4,7 @@ import re
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from src.core import align_two_holograms, extract_plus_one_order, shift_spectrum_to_center
+from src.core import align_two_holograms, detect_carrier, extract_plus_one_order
 
 
 def plot_fft_debug(holo1, holo2, prefix, output_dir):
@@ -26,7 +26,7 @@ def plot_fft_debug(holo1, holo2, prefix, output_dir):
         # --- Cột 2: Phổ Fourier (log scale) ---
         F = np.fft.fftshift(np.fft.fft2(holo))
         I_log = np.log1p(np.abs(F) ** 2)
-        I_norm = (I_log - I_log.min()) / (I_log.max() - I_log.min())
+        I_norm = (I_log - I_log.min()) / (I_log.max() - I_log.min() + 1e-12)
 
         axes[row, 1].imshow(I_norm, cmap='hot')
         axes[row, 1].set_title(f"{label} — Phổ Fourier (log)\nCyan = trục tâm | Xanh lá = búp được chọn")
@@ -35,28 +35,33 @@ def plot_fft_debug(holo1, holo2, prefix, output_dir):
 
         # Gọi hàm phát hiện sideband để lấy centroid thực tế
         try:
-            _, centroid, smoothed_mask = extract_plus_one_order(holo)
-            c_y, c_x = centroid
-            axes[row, 1].plot(c_x, c_y, 'g+', markersize=16, markeredgewidth=2.5,
-                              label=f"Búp chọn: ({c_x:.1f}, {c_y:.1f})")
+            kx, ky, rx, ry, abs_y, abs_x = detect_carrier(holo)
+            axes[row, 1].plot(abs_x, abs_y, 'g+', markersize=16, markeredgewidth=2.5,
+                              label=f"Búp chọn: ({abs_x:.1f}, {abs_y:.1f})")
             axes[row, 1].plot(cx, cy, 'b+', markersize=12, markeredgewidth=2,
                               label=f"DC: ({cx}, {cy})")
+            
+            import matplotlib.patches as patches
+            rect = patches.Rectangle((abs_x - rx, abs_y - ry), 2*rx, 2*ry,
+                                      linewidth=1.5, edgecolor='lime', facecolor='none', linestyle='--')
+            axes[row, 1].add_patch(rect)
+            
             axes[row, 1].legend(loc='upper right', fontsize=8)
 
             # In thông tin ra console
-            side = "PHẢI" if c_x > cx else "TRÁI"
-            vert = "DƯỚI" if c_y > cy else "TRÊN"
-            print(f"    [{label}] Búp chọn tại pixel ({c_x:.1f}, {c_y:.1f}) "
-                  f"→ nằm ở {side}-{vert} so với DC ({cx}, {cy})")
+            side = "PHẢI" if kx > 0 else "TRÁI"
+            vert = "DƯỚI" if ky > 0 else "TRÊN"
+            print(f"    [{label}] Búp chọn tại pixel ({abs_x:.1f}, {abs_y:.1f}) "
+                  f"→ nằm ở {side}-{vert} so với DC ({cx}, {cy}) | rx={rx:.1f}, ry={ry:.1f}")
         except Exception as e:
             axes[row, 1].set_title(f"{label} — Phổ Fourier (log)\n❌ Lỗi phát hiện: {e}")
             print(f"    [{label}] ❌ Không phát hiện được sideband: {e}")
 
-        # --- Cột 3: Mặt nạ lọc (smoothed mask) đã chọn ---
+        # --- Cột 3: Mặt nạ lọc (sigmoid mask) ---
         try:
-            _, _, smoothed_mask = extract_plus_one_order(holo)
-            axes[row, 2].imshow(smoothed_mask, cmap='viridis')
-            axes[row, 2].set_title(f"{label} — Smoothed Mask (vùng lọc phổ)\nSáng = lọc mạnh, Tối = bỏ")
+            _, _, mask = extract_plus_one_order(holo)
+            axes[row, 2].imshow(mask, cmap='viridis')
+            axes[row, 2].set_title(f"{label} — Sigmoid Mask (bộ lọc)\nSáng = lọc mạnh, Tối = bỏ")
             axes[row, 2].axhline(cy, color='cyan', linewidth=0.8, linestyle='--', alpha=0.7)
             axes[row, 2].axvline(cx, color='cyan', linewidth=0.8, linestyle='--', alpha=0.7)
         except Exception:
