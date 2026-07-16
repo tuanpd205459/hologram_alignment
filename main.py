@@ -150,7 +150,7 @@ def process_folder(raw_dir, output_dir, debug=True):
             fig, axes = plt.subplots(2, 3, figsize=(18, 11))
             fig.suptitle(
                 f"Kết quả Alignment — Mẫu: {prefix} | "
-                f"Sub-pixel shift: ({k_shifts[0]:.4f}, {k_shifts[1]:.4f}) | "
+                f"Shift k1: ({k1_shifts[0]:.2f}, {k1_shifts[1]:.2f}), k2: ({k2_shifts[0]:.2f}, {k2_shifts[1]:.2f}) | "
                 f"Hội tụ: {opt_result.success}",
                 fontsize=12
             )

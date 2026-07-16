@@ -125,6 +125,13 @@ def _detect_sideband(amp, H, W, min_area=5, margin=5.0):
 
     target_cx, target_cy = target['centroid']
 
+    # LUÔN ÉP BUỘC CHỌN BÚP BÊN PHẢI. 
+    # Do biến đổi Fourier của ảnh thực có tính đối xứng Hermitian,
+    # búp bên phải sẽ đối xứng hoàn toàn với búp bên trái qua tâm (cx, cy).
+    if target_cx < cx:
+        target_cx = cx + (cx - target_cx)
+        target_cy = cy + (cy - target_cy)
+
     best_dist, best_step1 = float('inf'), None
     for c in step1_comps:
         d = np.sqrt((c['centroid'][0] - target_cx)**2 + (c['centroid'][1] - target_cy)**2)
