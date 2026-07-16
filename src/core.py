@@ -246,16 +246,28 @@ def apply_subpixel_shift(F_centered, k1, k2):
     return field * ramp
 
 
-def phase_alignment_cost(k, field_1, F_centered_2):
+def phase_alignment_cost(k, F_centered_1, F_centered_2):
     """
-    Hàm mục tiêu: tối đa hoá |mean(U1 * conj(U2_shifted) / |...|)|.
-    Khi pha đồng nhất → tất cả unit phasor cùng hướng → metric → 1.
+    Hàm mục tiêu: Tối ưu hóa ĐỒNG THỜI lượng dịch cho cả ảnh 1 (k1) và ảnh 2 (k2).
+    - Ảnh 1 thực hiện shift với k1 = (k1x, k1y)
+    - Ảnh 2 thực hiện shift với k2 = (k2x, k2y)
+    - Vòng lặp minimize sẽ chạy hàm này liên tục để tìm k làm cho Pha 1 ~ Pha 2.
     """
-    k1, k2     = k
-    field_2    = apply_subpixel_shift(F_centered_2, k1, k2)
-    diff       = field_1 * np.conj(field_2)
+    k1x, k1y, k2x, k2y = k
+    
+    # Shift cả 2 ảnh
+    field_1 = apply_subpixel_shift(F_centered_1, k1x, k1y)
+    field_2 = apply_subpixel_shift(F_centered_2, k2x, k2y)
+    
+    # Tính sai lệch pha (Pha 1 vs Pha 2)
+    diff = field_1 * np.conj(field_2)
     phase_only = diff / (np.abs(diff) + 1e-12)
-    return -np.abs(np.mean(phase_only))
+    
+    # Tính điểm khớp pha. Khi Pha 1 ~ Pha 2, điểm số np.abs(np.mean) sẽ hội tụ về 1.
+    # Thêm lượng regularization siêu nhỏ (1e-6) để giữ (k1, k2) không bị trôi đi vô cực.
+    reg = 1e-6 * (k1x**2 + k1y**2 + k2x**2 + k2y**2)
+    
+    return -np.abs(np.mean(phase_only)) + reg
 
 
 def align_two_holograms(holo_1, holo_2):
@@ -266,29 +278,35 @@ def align_two_holograms(holo_1, holo_2):
     F1_c, centroid_1, _ = extract_plus_one_order(holo_1)
     F2_c, centroid_2, _ = extract_plus_one_order(holo_2)
 
-    # 2. Tính field_1 (Baseband reference)
-    field_1 = np.fft.ifft2(np.fft.ifftshift(F1_c))
+    # 2. Vòng lặp tối ưu hóa (Khởi tạo k1 và k2 đều bằng 0)
+    k_init = [0.0, 0.0, 0.0, 0.0]
 
-    # 3. Optimize (Cả 2 phổ đã về (0,0) chính xác nên khởi tạo k1=0, k2=0)
-    k1_init = 0.0
-    k2_init = 0.0
-
+    # Lặp đến khi nào Pha 1 ~ Pha 2 thì dừng
     res = minimize(
         phase_alignment_cost,
-        [k1_init, k2_init],
-        args=(field_1, F2_c),
+        k_init,
+        args=(F1_c, F2_c),
         method='Powell',
-        options={'maxiter': 200, 'ftol': 1e-9}
+        options={'maxiter': 500, 'ftol': 1e-9}
     )
-    k1_opt, k2_opt = res.x
+    k1x_opt, k1y_opt, k2x_opt, k2y_opt = res.x
 
-    # 4. Áp dụng shift
-    field_2_aligned = apply_subpixel_shift(F2_c, k1_opt, k2_opt)
+    # 3. Xuất ra Pha 1 và Pha 2 sau khi shift với k1 và k2 tối ưu
+    field_1_aligned = apply_subpixel_shift(F1_c, k1x_opt, k1y_opt)
+    field_2_aligned = apply_subpixel_shift(F2_c, k2x_opt, k2y_opt)
+
+    # 4. Bù hằng số pha toàn cục (Global Phase Offset) 
+    # Ép hiệu pha hội tụ chính xác về mốc 0.0 rad
+    diff_complex = field_1_aligned * np.conj(field_2_aligned)
+    mean_phase_offset = np.angle(np.mean(diff_complex / (np.abs(diff_complex) + 1e-12)))
+    field_2_aligned = field_2_aligned * np.exp(1j * mean_phase_offset)
 
     return {
-        'field_1':             field_1,
+        'field_1':             field_1_aligned,
         'field_2_aligned':     field_2_aligned,
-        'k_shifts':            (k1_opt, k2_opt),
+        'k1_shifts':           (k1x_opt, k1y_opt),
+        'k2_shifts':           (k2x_opt, k2y_opt),
         'centroids':           (centroid_1, centroid_2),
-        'optimization_result': res
+        'optimization_result': res,
+        'phase_offset':        mean_phase_offset
     }

@@ -128,12 +128,14 @@ def process_folder(raw_dir, output_dir, debug=True):
 
         try:
             results = align_two_holograms(holo1, holo2)
-            k_shifts = results['k_shifts']
+            k1_shifts = results['k1_shifts']
+            k2_shifts = results['k2_shifts']
             opt_result = results['optimization_result']
 
-            print(f"  -> Lượng dịch sub-pixel (k1, k2): {k_shifts[0]:.4f}, {k_shifts[1]:.4f}")
-            print(f"  -> Optimizer hội tụ: {opt_result.success} | "
-                  f"Fun value: {opt_result.fun:.6f} | Iterations: {opt_result.nit}")
+            print(f"  -> Lượng dịch ảnh 1 (k1): {k1_shifts[0]:.4f}, {k1_shifts[1]:.4f}")
+            print(f"  -> Lượng dịch ảnh 2 (k2): {k2_shifts[0]:.4f}, {k2_shifts[1]:.4f}")
+            print(f"  -> Lặp đến khi hội tụ: {opt_result.success} | "
+                  f"Điểm số: {opt_result.fun:.6f} | Số vòng lặp: {opt_result.nit}")
 
             field_1 = results['field_1']
             field_2 = results['field_2_aligned']
