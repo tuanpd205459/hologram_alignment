@@ -4,164 +4,167 @@ from scipy.optimize import minimize
 
 def _detect_sideband(amp, H, W, min_area=5, margin=5.0):
     """
-    Thuật toán nhận diện vùng Fourier tự động (Otsu + Morphology).
-    Trả về (kx, ky) tương đối so với tâm và bán kính (rx, ry) của bộ lọc.
+    Thuật toán nhận diện vùng Fourier tự động (Otsu + Morphology nâng ngưỡng 1%)
+    được copy chính xác từ fourier_region_recognition của multiangle_phase_retrieval,
+    chỉ thay đổi hướng chọn búp phổ sang bên PHẢI (centroid_x > cx).
     """
     cx, cy = W // 2, H // 2
     
-    # ── Custom Otsu trên float data (tránh mất dải động khi ép uint8) ────────
-    amp_flat        = amp.ravel()
-    hist, bin_edges = np.histogram(amp_flat, bins=256)
-    bin_centers     = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-    total           = hist.sum()
-    sum_total       = np.sum(bin_centers * hist)
-    sum_bg, w_bg    = 0.0, 0
-    max_var, gtl    = 0.0, bin_centers[0]
-
-    for i in range(256):
-        w_bg += hist[i]
-        if w_bg == 0: continue
-        w_fg = total - w_bg
-        if w_fg == 0: break
-        sum_bg  += bin_centers[i] * hist[i]
-        m_bg     = sum_bg / w_bg
-        m_fg     = (sum_total - sum_bg) / w_fg
-        variance = w_bg * w_fg * (m_bg - m_fg) ** 2
-        if variance > max_var:
-            max_var = variance
-            gtl     = bin_centers[i]
-
-    # ── Kernel morphology (kích thước vừa phải, ít hung hăng hơn) ───────────
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-
+    # 1. Tính ngưỡng Otsu khởi đầu (GTL) trên RAW amplitude
+    amp_flat = amp.ravel()
+    nbins = 256
+    hist, bin_edges = np.histogram(amp_flat, bins=nbins)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    
+    total = hist.sum()
+    sum_total = np.sum(bin_centers * hist)
+    sum_bg = 0.0
+    weight_bg = 0
+    max_variance = 0.0
+    best_threshold = bin_centers[0]
+    
+    for i in range(nbins):
+        weight_bg += hist[i]
+        if weight_bg == 0:
+            continue
+        weight_fg = total - weight_bg
+        if weight_fg == 0:
+            break
+        sum_bg += bin_centers[i] * hist[i]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if variance > max_variance:
+            max_variance = variance
+            best_threshold = bin_centers[i]
+            
+    gtl = best_threshold
+    
+    T = gtl
+    step = 0.01 * gtl
+    max_iter = 200
+    best_components = None
+    num_labels_prev = 0
+    
+    # Kernel morphology
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    
     def _threshold_and_regionprops(threshold):
         bw = (amp > threshold).astype(np.uint8) * 255
-        cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         bw_area = np.zeros_like(bw)
-        for cnt in cnts:
+        for cnt in contours:
             if cv2.contourArea(cnt) > min_area:
                 cv2.drawContours(bw_area, [cnt], -1, 255, -1)
-        if cv2.countNonZero(bw_area) == 0:
-            bw_area = bw
         bw_close = cv2.morphologyEx(bw_area, cv2.MORPH_CLOSE, kernel_close)
-        cnts_f, _ = cv2.findContours(bw_close, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        bw_fill   = np.zeros_like(bw_close)
-        cv2.drawContours(bw_fill, cnts_f, -1, 255, -1)
-        bw_open   = cv2.morphologyEx(bw_fill, cv2.MORPH_OPEN, kernel_open)
-        if cv2.countNonZero(bw_open) == 0:
-            bw_open = bw_area
-
-        n_lbl, _, stats, centroids = cv2.connectedComponentsWithStats(bw_open)
+        contours_fill, _ = cv2.findContours(bw_close, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        bw_filled = np.zeros_like(bw_close)
+        cv2.drawContours(bw_filled, contours_fill, -1, 255, -1)
+        bw_open = cv2.morphologyEx(bw_filled, cv2.MORPH_OPEN, kernel_open)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(bw_open)
         comps = []
-        for idx in range(1, n_lbl):
-            area = stats[idx, cv2.CC_STAT_AREA]
+        for label_idx in range(1, num_labels):
+            area = stats[label_idx, cv2.CC_STAT_AREA]
             if area >= min_area:
                 comps.append({
-                    'centroid': centroids[idx].copy(),
-                    'bbox': (stats[idx, cv2.CC_STAT_LEFT], stats[idx, cv2.CC_STAT_TOP],
-                             stats[idx, cv2.CC_STAT_WIDTH], stats[idx, cv2.CC_STAT_HEIGHT]),
+                    'centroid': centroids[label_idx].copy(),
+                    'bbox': (stats[label_idx, cv2.CC_STAT_LEFT],
+                             stats[label_idx, cv2.CC_STAT_TOP],
+                             stats[label_idx, cv2.CC_STAT_WIDTH],
+                             stats[label_idx, cv2.CC_STAT_HEIGHT]),
                     'area': int(area)
                 })
         return bw_open, comps
 
-    _, step1_comps = _threshold_and_regionprops(gtl)
-
-    T, step = gtl, 0.01 * gtl
-    best_comps = None
-
-    for _ in range(200):
-        _, comps = _threshold_and_regionprops(T)
-        if len(comps) == 3:
-            best_comps = comps
+    # Bước 1: Lưu ảnh nhị phân tại GTL
+    step1_binary, step1_components = _threshold_and_regionprops(gtl)
+    
+    # Bước 2: Tăng ngưỡng 1% GTL cho đến khi số vùng bằng 3
+    for _ in range(max_iter):
+        _, components = _threshold_and_regionprops(T)
+        if len(components) == 3:
+            best_components = components
             break
-        elif len(comps) < 3:
-            if best_comps is None:
-                best_comps = comps if comps else (step1_comps if step1_comps else None)
-            break
-        best_comps = comps
+        elif len(components) == 2 and (best_components is None or num_labels_prev != 3):
+            best_components = components
+        elif len(components) == 1 and best_components is None:
+            best_components = components
+            
+        num_labels_prev = len(components)
         T += step
-        if T >= amp.max(): break
-
-    if not best_comps and step1_comps:
-        best_comps = step1_comps
-
-    if not best_comps:
-        Y0, X0 = np.ogrid[0:H, 0:W]
-        search = amp.copy()
-        search[np.sqrt((X0 - cx)**2 + (Y0 - cy)**2) < 20] = 0
-
-        def _pick_peak_as_comp(search_amp, suppress_r=35):
-            idx = np.argmax(search_amp)
-            py_, px_ = np.unravel_index(idx, search_amp.shape)
-            bw_peak = np.zeros((H, W), dtype=np.uint8)
-            cv2.circle(bw_peak, (int(px_), int(py_)), suppress_r // 2, 255, -1)
-            _, _, stats_, centroids_ = cv2.connectedComponentsWithStats(bw_peak)
-            comp = {
-                'centroid': np.array([float(px_), float(py_)]),
-                'bbox': (max(0, int(px_) - suppress_r // 2), max(0, int(py_) - suppress_r // 2),
-                         suppress_r, suppress_r),
-                'area': int(np.pi * (suppress_r // 2) ** 2)
-            }
-            y1s = max(0, py_ - suppress_r)
-            y2s = min(H, py_ + suppress_r)
-            x1s = max(0, px_ - suppress_r)
-            x2s = min(W, px_ + suppress_r)
-            search_amp[y1s:y2s, x1s:x2s] = 0
-            return comp
-
-        best_comps = [_pick_peak_as_comp(search), _pick_peak_as_comp(search)]
-
-    dc_comp = min(best_comps, key=lambda c: (c['centroid'][0] - cx)**2 + (c['centroid'][1] - cy)**2)
-    sidebands = [c for c in best_comps if c is not dc_comp]
-    if not sidebands:
-        sidebands = best_comps
-
-    right_sb = [c for c in sidebands if c['centroid'][0] > cx]
-    if right_sb:
-        target = max(right_sb, key=lambda c: c['centroid'][0])
+        if T >= amp.max():
+            break
+            
+    if best_components is None:
+        best_components = components if len(components) > 0 else []
+        
+    # Phân loại: DC gần tâm nhất
+    if len(best_components) > 0:
+        dc_comp = min(best_components, key=lambda c: (c['centroid'][0] - cx)**2 + (c['centroid'][1] - cy)**2)
+        sidebands = [c for c in best_components if c is not dc_comp]
     else:
-        target = max(sidebands, key=lambda c: (c['centroid'][0] - cx)**2 + (c['centroid'][1] - cy)**2)
-
-    target_cx, target_cy = target['centroid']
-
-    # LUÔN ÉP BUỘC CHỌN BÚP BÊN PHẢI. 
-    # Do biến đổi Fourier của ảnh thực có tính đối xứng Hermitian,
-    # búp bên phải sẽ đối xứng hoàn toàn với búp bên trái qua tâm (cx, cy).
-    if target_cx < cx:
-        target_cx = cx + (cx - target_cx)
-        target_cy = cy + (cy - target_cy)
-
-    best_dist, best_step1 = float('inf'), None
-    for c in step1_comps:
-        d = np.sqrt((c['centroid'][0] - target_cx)**2 + (c['centroid'][1] - target_cy)**2)
-        if d < best_dist:
-            best_dist  = d
-            best_step1 = c
-
-    if best_step1 is not None:
-        left, top, w, h = best_step1['bbox']
-        px, py          = best_step1['centroid']
+        sidebands = []
+        
+    if len(sidebands) > 0:
+        # Chọn búp ở nửa PHẢI (centroid_x > cx)
+        right_sidebands = [c for c in sidebands if c['centroid'][0] > cx]
+        if len(right_sidebands) > 0:
+            target_comp = max(right_sidebands, key=lambda c: c['area'])
+        else:
+            target_comp = max(sidebands, key=lambda c: c['centroid'][0])
+            
+        target_cx, target_cy = target_comp['centroid']
+        
+        # Bước 3: Tìm vùng lớn ở Bước 1
+        best_step1_dist = float('inf')
+        best_step1_comp = None
+        for c in step1_components:
+            d = np.sqrt((c['centroid'][0] - target_cx)**2 + (c['centroid'][1] - target_cy)**2)
+            if d < best_step1_dist:
+                best_step1_dist = d
+                best_step1_comp = c
+                
+        if best_step1_comp is not None:
+            left, top, w, h = best_step1_comp['bbox']
+            px, py = best_step1_comp['centroid']
+        else:
+            left, top, w, h = target_comp['bbox']
+            px, py = target_cx, target_cy
+            
+        rx = w / 2.0 + margin
+        ry = h / 2.0 + margin
     else:
-        left, top, w, h = target['bbox']
-        px, py          = target_cx, target_cy
-
-    Y_grid, X_grid = np.mgrid[0:H, 0:W]
-    local_mask = np.sqrt((X_grid - px)**2 + (Y_grid - py)**2) <= 7
-    weights    = amp[local_mask]
-    total_w    = weights.sum()
-
-    if total_w > 0:
-        refined_cx = float(np.sum(X_grid[local_mask] * weights) / total_w)
-        refined_cy = float(np.sum(Y_grid[local_mask] * weights) / total_w)
+        # Fallback peak search ở nửa bên PHẢI
+        search_amp = amp.copy()
+        y_coords = np.arange(H)
+        x_coords = np.arange(W)
+        X_grid, Y_grid = np.meshgrid(x_coords, y_coords)
+        dist_from_dc = np.sqrt((X_grid - cx)**2 + (Y_grid - cy)**2)
+        search_amp[dist_from_dc < 15] = 0
+        search_amp[:, :cx] = 0  # Chỉ tìm ở nửa bên phải
+        max_idx = np.argmax(search_amp)
+        py_peak, px_peak = np.unravel_index(max_idx, search_amp.shape)
+        px, py = float(px_peak), float(py_peak)
+        rx, ry = 20.0, 20.0
+        
+    # Tinh chỉnh sub-pixel
+    y_coords = np.arange(H)
+    x_coords = np.arange(W)
+    X, Y = np.meshgrid(x_coords, y_coords)
+    
+    local_r = 7
+    local_mask = (np.sqrt((X - px)**2 + (Y - py)**2) <= local_r)
+    weights = amp[local_mask]
+    total_weight = np.sum(weights)
+    
+    if total_weight > 0:
+        kx = float(np.sum(X[local_mask] * weights) / total_weight - cx)
+        ky = float(np.sum(Y[local_mask] * weights) / total_weight - cy)
     else:
-        refined_cx, refined_cy = float(px), float(py)
-
-    rx = w / 2.0 + margin
-    ry = h / 2.0 + margin
-    kx = refined_cx - cx
-    ky = refined_cy - cy
-
+        kx = float(px - cx)
+        ky = float(py - cy)
+        
     return kx, ky, rx, ry
 
 
